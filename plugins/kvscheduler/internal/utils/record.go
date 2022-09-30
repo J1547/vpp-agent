@@ -17,11 +17,13 @@ package utils
 import (
 	"encoding/json"
 
+	"go.ligato.io/cn-infra/v2/logging"
 	"google.golang.org/protobuf/encoding/protojson"
-	"google.golang.org/protobuf/encoding/prototext"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/reflect/protoregistry"
+
+	"go.ligato.io/vpp-agent/v3/pkg/models"
 )
 
 // RecordedProtoMessage is a proto.Message suitable for recording and access via
@@ -35,7 +37,7 @@ type RecordedProtoMessage struct {
 // message name.
 type ProtoWithName struct {
 	ProtoMsgName string
-	ProtoMsgData string
+	ProtoMsgData json.RawMessage
 }
 
 // MarshalJSON marshalls proto message using the marshaller from protojson.
@@ -44,25 +46,20 @@ type ProtoWithName struct {
 func (p *RecordedProtoMessage) MarshalJSON() ([]byte, error) {
 	var (
 		msgName string
-		msgData string
+		msgData []byte
 		err     error
 	)
 	if p != nil {
-		msgName = string(proto.MessageName(p.Message))
-		b, err := prototext.Marshal(p.Message)
+		msgName = p.ProtoMsgName
+		msgData, err = protojson.Marshal(p.Message)
 		if err != nil {
 			return nil, err
 		}
-		msgData = string(b)
 	}
-	pwn, err := json.Marshal(ProtoWithName{
+	return json.Marshal(&ProtoWithName{
 		ProtoMsgName: msgName,
-		ProtoMsgData: msgData,
+		ProtoMsgData: json.RawMessage(msgData),
 	})
-	if err != nil {
-		return nil, err
-	}
-	return pwn, nil
 }
 
 // UnmarshalJSON un-marshalls proto message using the marshaller from protojson.
@@ -77,17 +74,22 @@ func (p *RecordedProtoMessage) UnmarshalJSON(data []byte) error {
 	if p.ProtoMsgName == "" {
 		return nil
 	}
-	msgType, err := protoregistry.GlobalTypes.FindMessageByName(protoreflect.FullName(pwn.ProtoMsgName))
+
+	// try to find the message type in the default registry
+	typeRegistry := models.DefaultRegistry.MessageTypeRegistry()
+	fullMsgName := protoreflect.FullName(p.ProtoMsgName)
+	msgType, err := typeRegistry.FindMessageByName(fullMsgName)
+	if err != nil {
+		// if not found use the proto global types registry as a fallback
+		logging.Debugf("cannot get message type for message name %s from default registry: %v", fullMsgName, err)
+		msgType, err = protoregistry.GlobalTypes.FindMessageByName(fullMsgName)
+	}
 	if err != nil {
 		return err
 	}
+
 	msg := msgType.New().Interface()
-	if len(pwn.ProtoMsgData) > 0 && pwn.ProtoMsgData[0] == '{' {
-		err = protojson.Unmarshal([]byte(pwn.ProtoMsgData), msg)
-	} else {
-		err = prototext.Unmarshal([]byte(pwn.ProtoMsgData), msg)
-	}
-	if err != nil {
+	if err = protojson.Unmarshal(pwn.ProtoMsgData, msg); err != nil {
 		return err
 	}
 	p.Message = msg
